@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+    },
+    "C_Cpp.default.defines": [
+        "UINT_TEST"
+    ]
+}
