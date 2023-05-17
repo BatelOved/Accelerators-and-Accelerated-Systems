@@ -13,7 +13,6 @@ void colorHist(uchar img[][CHANNELS], int pixelCount, int histograms[][LEVELS]){
     }
 }
 
-
 void prefixSum(int arr[], int size, int res[]){
     int sum = 0;
     for (int i = 0; i < size; i++) {

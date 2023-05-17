@@ -2,24 +2,20 @@
 
 __device__ void prefixSum(int arr[], int len, int tid, int threads)
 {
+    assert(threads >= len);
     int increment;
-
-    for (int j = tid; j < len; j += threads)
-    {
-        for (int i = 1; i < len; i *= 2)
-        {
-            if (tid >= i)
-            {
-                increment = arr[tid - i];
-            }
-            __syncthreads();
-
-            if (tid >= i)
-            {
-                arr[tid] += increment;
-            }
-            __syncthreads();
+    
+    // Kogge-Stone Algorithm
+    for (int stride = 1; stride < len; stride *= 2) {
+        if (tid < len && tid >= stride) {
+            increment = arr[tid - stride];
         }
+        __syncthreads();
+        
+        if (tid < len && tid >= stride) {
+            arr[tid] += increment;
+        }
+        __syncthreads();
     }
 }
 
@@ -34,7 +30,7 @@ __device__ void argmin(int arr[], int len, int tid, int threads)
         if (tid < halfLen)
         {
             if (arr[tid] == arr[tid + halfLen])
-            { // a corenr case
+            { // a corner case
                 int lhsIdx = tid;
                 int rhdIdx = tid + halfLen;
                 int lhsOriginalIdx = firstIteration ? lhsIdx : arr[prevHalfLength + lhsIdx];
@@ -105,99 +101,64 @@ __device__ void performMapping(uchar maps[][LEVELS], uchar targetImg[][CHANNELS]
 
 __device__ void calculateMap(uchar map[][LEVELS], int target[][LEVELS], int reference[][LEVELS])
 {
-    // int tid = threadIdx.x;
-
-    // int diff[LEVELS][LEVELS];
-    // for (int k = 0; k < CHANNELS; k++)
-    // {
-    //     for (int i = tid; i < LEVELS * LEVELS; i += blockDim.x)
-    //     {
-    //         diff[i / LEVELS][i % LEVELS] = abs(reference[k][i % LEVELS] - target[k][i / LEVELS]);
-    //     }
-    //     __syncthreads();
-
-    //     for (int j = tid; j < LEVELS; j += blockDim.x)
-    //     {
-    //         argmin(diff[j], LEVELS, tid, blockDim.x);
-    //         __syncthreads();
-    //         map[k][j] = diff[j][0];
-    //     }
-    //     __syncthreads();
-    // }
-
     int tid = threadIdx.x;
-    int diff[LEVELS][LEVELS];
+    __shared__ int diff_row[LEVELS];
 
-    for (int k = 0; k < CHANNELS; k++) {
-        if (tid == 0) {
-            for(int i_ref = 0; i_ref < LEVELS; i_ref++){
-                for(int i_tar = 0; i_tar < LEVELS; i_tar++){
-                    diff[i_tar][i_ref] = abs(reference[k][i_ref] - target[k][i_tar]);
-                }
+    for (int i = 0; i < CHANNELS; i++) {
+        for(int i_tar = 0; i_tar < LEVELS; i_tar++) {
+            for(int i_ref = tid; i_ref < LEVELS; i_ref += blockDim.x) {
+                diff_row[tid] = abs(reference[i][tid] - target[i][i_tar]);
             }
-        }
-        __syncthreads();
-    
-        if (tid == 0) {
-            for(int j = 0; j < LEVELS; j++) {
-                argmin(diff[j], LEVELS, tid, blockDim.x);
-                __syncthreads();
-                map[k][j] = diff[j][0];
+            __syncthreads();
+
+            argmin(diff_row, LEVELS, tid, LEVELS/2);
+            __syncthreads();
+
+            if (tid == 0) {
+                map[i][i_tar] = diff_row[1];
             }
+            __syncthreads();
         }
     }
-
 }
 
-__device__ void process_image_kernel(uchar *targets, uchar *refrences, uchar *results)
+__global__ void process_image_kernel(uchar *targets, uchar *refrences, uchar *results)
 {
-    int histograms_tar[CHANNELS][LEVELS];
-    int histograms_ref[CHANNELS][LEVELS];
-    uchar map[CHANNELS][LEVELS];
+    assert(blockDim.x % 2 == 0);
+
+    __shared__ int histograms_tar[CHANNELS][LEVELS];
+    __shared__ int histograms_ref[CHANNELS][LEVELS];
+    __shared__ uchar map[CHANNELS][LEVELS];
+
     int tid = threadIdx.x;
+    int bid = blockIdx.x;
 
-    /*Calculate Target Histogram*/
-    colorHist((uchar(*)[CHANNELS])targets, histograms_tar);
-    __syncthreads();
+    uchar *img_target = &targets[bid * SIZE * SIZE * CHANNELS];
+    uchar *img_refrence = &refrences[bid * SIZE * SIZE * CHANNELS];
+    uchar *img_out = &results[bid * SIZE * SIZE * CHANNELS];
 
-    /*Calculate Reference Histogram*/
-    colorHist((uchar(*)[CHANNELS])refrences, histograms_ref);
+
+    /*Calculate Histograms*/
+    colorHist((uchar(*)[CHANNELS])img_target, histograms_tar);
+    colorHist((uchar(*)[CHANNELS])img_refrence, histograms_ref);
     __syncthreads();
 
     /*Calculate Reference and target Histogram-Prefix sum*/
-    for (int k = 0; k < CHANNELS; k++)
-    {
+    for (int k = 0; k < CHANNELS; k++) {
         prefixSum(histograms_tar[k], LEVELS, tid, blockDim.x);
-        __syncthreads();
         prefixSum(histograms_ref[k], LEVELS, tid, blockDim.x);
-        __syncthreads();
     }
+    __syncthreads();
 
     calculateMap(map, histograms_tar, histograms_ref);
-    // for (int i = 0; i < CHANNELS; i++) {
-    //     for (int j = 0; j < LEVELS; j++) {
-    //         map[i][j] = 5;
-    //     }
-    // }
-    performMapping(map, (uchar(*)[CHANNELS])targets, (uchar(*)[CHANNELS])results);
-}
-
-__global__ void process_image_kernel_wrapper(uchar *targets, uchar *refrences, uchar *results)
-{
-    int bid = blockIdx.x;
-
-    uchar * current_pic_tar = targets+bid*SIZE*SIZE*CHANNELS;
-    uchar * current_pic_ref = refrences+bid*SIZE*SIZE*CHANNELS;
-    uchar * current_pic_out = results+bid*SIZE*SIZE*CHANNELS;
-
-    process_image_kernel(current_pic_tar, current_pic_ref, current_pic_out);
     __syncthreads();
+
+    performMapping(map, (uchar(*)[CHANNELS])img_target, (uchar(*)[CHANNELS])img_out);
 }
 
 /* Task serial context struct with necessary CPU / GPU pointers to process a single image */
 struct task_serial_context
 {
-    // TODO define task serial memory buffers
     uchar *inputBuffer_tar;
     uchar *inputBuffer_ref;
     uchar *outputBuffer;
@@ -210,7 +171,6 @@ struct task_serial_context *task_serial_init()
 {
     auto context = new task_serial_context;
 
-    // TODO: allocate GPU memory for a single input image and a single output image
     cudaMalloc(&context->inputBuffer_tar, N_IMAGES * SIZE * SIZE * CHANNELS * sizeof(uchar));
     cudaMalloc(&context->inputBuffer_ref, N_IMAGES * SIZE * SIZE * CHANNELS * sizeof(uchar));
     cudaMalloc(&context->outputBuffer, N_IMAGES * SIZE * SIZE * CHANNELS * sizeof(uchar));
@@ -222,11 +182,6 @@ struct task_serial_context *task_serial_init()
  * provided output host array */
 void task_serial_process(struct task_serial_context *context, uchar *images_target, uchar *images_refrence, uchar *images_result)
 {
-    // TODO: in a for loop:
-    //    1. copy the relevant image from images_in to the GPU memory you allocated
-    //    2. invoke GPU kernel on this image
-    //    3. copy output from GPU memory to relevant location in images_out_gpu_serial
-
     for (int i = 0; i < N_IMAGES; i++) {
         uchar *img_target = &context->inputBuffer_tar[i * SIZE * SIZE * CHANNELS];
         uchar *img_refrence = &context->inputBuffer_ref[i * SIZE * SIZE * CHANNELS];
@@ -235,20 +190,16 @@ void task_serial_process(struct task_serial_context *context, uchar *images_targ
         cudaMemcpy(img_target, &images_target[i * SIZE * SIZE * CHANNELS], SIZE * SIZE * CHANNELS * sizeof(uchar), cudaMemcpyHostToDevice);
         cudaMemcpy(img_refrence, &images_refrence[i * SIZE * SIZE * CHANNELS], SIZE * SIZE * CHANNELS * sizeof(uchar), cudaMemcpyHostToDevice);
         
-        process_image_kernel_wrapper<<<1, 1024>>>(img_target, img_refrence, img_out);
+        process_image_kernel<<<1, 1024>>>(img_target, img_refrence, img_out);
+        cudaDeviceSynchronize();
 
-        cudaMemcpy(images_result, img_out, SIZE * SIZE * CHANNELS * sizeof(uchar), cudaMemcpyDeviceToHost);
-        for (int i = 0; i < 10; i ++)
-        {
-            printf("images_result+i is: %d\n", *(images_result+i));
-        }
+        cudaMemcpy(&images_result[i * SIZE * SIZE * CHANNELS], img_out, SIZE * SIZE * CHANNELS * sizeof(uchar), cudaMemcpyDeviceToHost);
     }
 }
 
 /* Release allocated resources for the task-serial implementation. */
 void task_serial_free(struct task_serial_context *context)
 {
-    // TODO: free resources allocated in task_serial_init
     cudaFree(context->inputBuffer_ref);
     cudaFree(context->inputBuffer_tar);
     cudaFree(context->outputBuffer);
@@ -258,7 +209,6 @@ void task_serial_free(struct task_serial_context *context)
 /* Bulk GPU context struct with necessary CPU / GPU pointers to process all the images */
 struct gpu_bulk_context
 {
-    // TODO define bulk-GPU memory buffers
     uchar *inputBuffer_tar;
     uchar *inputBuffer_ref;
     uchar *outputBuffer;
@@ -270,7 +220,6 @@ struct gpu_bulk_context *gpu_bulk_init()
 {
     auto context = new gpu_bulk_context;
 
-    // TODO: allocate GPU memory for all input images and all output images
     cudaMalloc(&context->inputBuffer_tar, N_IMAGES * SIZE * SIZE * CHANNELS * sizeof(uchar));
     cudaMalloc(&context->inputBuffer_ref, N_IMAGES * SIZE * SIZE * CHANNELS * sizeof(uchar));
     cudaMalloc(&context->outputBuffer, N_IMAGES * SIZE * SIZE * CHANNELS * sizeof(uchar));
@@ -278,24 +227,17 @@ struct gpu_bulk_context *gpu_bulk_init()
     return context;
 }
 
-
-
-
 /* Process all the images in the given host array and return the output in the
  * provided output host array */
 void gpu_bulk_process(struct gpu_bulk_context *context, uchar *images_target, uchar *images_refrence, uchar *images_result)
 {
-    // TODO: copy all input images from images_in to the GPU memory you allocated
-    // TODO: invoke a kernel with N_IMAGES threadblocks, each working on a different image
-    // TODO: copy output images from GPU memory to images_out
-
     uchar *img_target = context->inputBuffer_tar;
     uchar *img_refrence = context->inputBuffer_ref;
     uchar *img_out = context->outputBuffer;
 
     cudaMemcpy(img_target, images_target, N_IMAGES * SIZE * SIZE * CHANNELS * sizeof(uchar), cudaMemcpyHostToDevice);
-    cudaMemcpy(img_refrence, images_refrence,N_IMAGES * SIZE * SIZE * CHANNELS * sizeof(uchar), cudaMemcpyHostToDevice);
-    process_image_kernel_wrapper<<<N_IMAGES, 1024>>>(img_target, img_refrence, img_out);
+    cudaMemcpy(img_refrence, images_refrence, N_IMAGES * SIZE * SIZE * CHANNELS * sizeof(uchar), cudaMemcpyHostToDevice);
+    process_image_kernel<<<N_IMAGES, 1024>>>(img_target, img_refrence, img_out);
     cudaDeviceSynchronize();
 
     cudaMemcpy(images_result, img_out, N_IMAGES * SIZE * SIZE * CHANNELS * sizeof(uchar), cudaMemcpyDeviceToHost);
@@ -304,7 +246,6 @@ void gpu_bulk_process(struct gpu_bulk_context *context, uchar *images_target, uc
 /* Release allocated resources for the bulk GPU implementation. */
 void gpu_bulk_free(struct gpu_bulk_context *context)
 {
-    // TODO: free resources allocated in gpu_bulk_init
     cudaFree(context->inputBuffer_ref);
     cudaFree(context->inputBuffer_tar);
     cudaFree(context->outputBuffer);
@@ -325,7 +266,6 @@ __global__ void colorHistWrapper(uchar img[][CHANNELS], int histograms[][LEVELS]
     __shared__ int histogramsSahred[CHANNELS][LEVELS];
 
     int tid = threadIdx.x;
-    ;
     int threads = blockDim.x;
 
     colorHist(img, histogramsSahred);
