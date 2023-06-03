@@ -137,7 +137,6 @@ __global__ void process_image_kernel(uchar *targets, uchar *refrences, uchar *re
     uchar *img_refrence = &refrences[bid * SIZE * SIZE * CHANNELS];
     uchar *img_out = &results[bid * SIZE * SIZE * CHANNELS];
 
-
     /*Calculate Histograms*/
     colorHist((uchar(*)[CHANNELS])img_target, histograms_tar);
     colorHist((uchar(*)[CHANNELS])img_refrence, histograms_ref);
@@ -237,6 +236,7 @@ void gpu_bulk_process(struct gpu_bulk_context *context, uchar *images_target, uc
 
     cudaMemcpy(img_target, images_target, N_IMAGES * SIZE * SIZE * CHANNELS * sizeof(uchar), cudaMemcpyHostToDevice);
     cudaMemcpy(img_refrence, images_refrence, N_IMAGES * SIZE * SIZE * CHANNELS * sizeof(uchar), cudaMemcpyHostToDevice);
+
     process_image_kernel<<<N_IMAGES, 1024>>>(img_target, img_refrence, img_out);
     cudaDeviceSynchronize();
 
