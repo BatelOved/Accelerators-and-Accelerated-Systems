@@ -6,6 +6,8 @@
 #include <random>
 #include <algorithm>
 #include <cassert>
+#include <iostream>
+
 
 #define SQR(a) ((a) * (a))
 
