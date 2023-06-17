@@ -1,20 +1,32 @@
 #include "ex2.h"
 #include <cuda/atomic>
 
-#define QUEUE_SIZE 16
+#define KILL_JOB_ID (-2)
+#define QUEUE_SLOTS 4
+#define REGISTERS_PER_THREAD 32
 
-__device__ void prefixSum(int arr[], int len, int tid, int threads)
-{
+#define RUN_IN_QUEUE(code)      \
+    do                          \
+    {                           \
+        int i = 0;              \
+        while (i < queue_count) \
+        {                       \
+            code                \
+                i++;            \
+        }                       \
+    } while (0)
+
+__device__ void prefixSum(int arr[], int len, int tid, int threads) {
     assert(threads >= len);
     int increment;
-    
+
     // Kogge-Stone Algorithm
     for (int stride = 1; stride < len; stride *= 2) {
         if (tid < len && tid >= stride) {
             increment = arr[tid - stride];
         }
         __syncthreads();
-        
+
         if (tid < len && tid >= stride) {
             arr[tid] += increment;
         }
@@ -22,26 +34,21 @@ __device__ void prefixSum(int arr[], int len, int tid, int threads)
     }
 }
 
-__device__ void argmin(int arr[], int len, int tid, int threads)
-{
+__device__ void argmin(int arr[], int len, int tid, int threads) {
     assert(threads == len / 2);
     int halfLen = len / 2;
     bool firstIteration = true;
     int prevHalfLength = 0;
-    while (halfLen > 0)
-    {
-        if (tid < halfLen)
-        {
-            if (arr[tid] == arr[tid + halfLen])
-            { // a corner case
+    while (halfLen > 0) {
+        if (tid < halfLen) {
+            if (arr[tid] == arr[tid + halfLen]) { // a corner case
                 int lhsIdx = tid;
                 int rhdIdx = tid + halfLen;
                 int lhsOriginalIdx = firstIteration ? lhsIdx : arr[prevHalfLength + lhsIdx];
                 int rhsOriginalIdx = firstIteration ? rhdIdx : arr[prevHalfLength + rhdIdx];
                 arr[tid + halfLen] = lhsOriginalIdx < rhsOriginalIdx ? lhsOriginalIdx : rhsOriginalIdx;
             }
-            else
-            { // the common case
+            else { // the common case
                 bool isLhsSmaller = (arr[tid] < arr[tid + halfLen]);
                 int idxOfSmaller = isLhsSmaller * tid + (!isLhsSmaller) * (tid + halfLen);
                 int smallerValue = arr[idxOfSmaller];
@@ -57,26 +64,21 @@ __device__ void argmin(int arr[], int len, int tid, int threads)
     }
 }
 
-__device__ void colorHist(uchar img[][CHANNELS], int histograms[][LEVELS])
-{
+__device__ void colorHist(uchar img[][CHANNELS], int histograms[][LEVELS]) {
     int tid = threadIdx.x;
 
-    if (tid < LEVELS)
-    {
-        for (int j = 0; j < CHANNELS; j++)
-        {
+    if (tid < LEVELS) {
+        for (int j = 0; j < CHANNELS; j++) {
             histograms[j][tid] = 0;
         }
     }
 
     __syncthreads();
 
-    for (int i = tid; i < SIZE * SIZE; i += blockDim.x)
-    {
-        uchar *rgbPixel = img[i];
-        for (int j = 0; j < CHANNELS; j++)
-        {
-            int *channelHist = histograms[j];
+    for (int i = tid; i < SIZE * SIZE; i += blockDim.x) {
+        uchar* rgbPixel = img[i];
+        for (int j = 0; j < CHANNELS; j++) {
+            int* channelHist = histograms[j];
             atomicAdd(&channelHist[rgbPixel[j]], 1);
         }
     }
@@ -84,49 +86,44 @@ __device__ void colorHist(uchar img[][CHANNELS], int histograms[][LEVELS])
     __syncthreads();
 }
 
-__device__ void performMapping(uchar maps[][LEVELS], uchar targetImg[][CHANNELS], uchar resultImg[][CHANNELS])
-{
+__device__ void performMapping(uchar maps[][LEVELS], uchar targetImg[][CHANNELS], uchar resultImg[][CHANNELS]) {
     int tid = threadIdx.x;
 
-    for (int i = tid; i < SIZE * SIZE; i += blockDim.x)
-    {
-        uchar *inRgbPixel = targetImg[i];
-        uchar *outRgbPixel = resultImg[i];
+    for (int i = tid; i < SIZE * SIZE; i += blockDim.x) {
+        uchar* inRgbPixel = targetImg[i];
+        uchar* outRgbPixel = resultImg[i];
 
-        for (int j = 0; j < CHANNELS; j++)
-        {
-            uchar *mapChannel = maps[j];
+        for (int j = 0; j < CHANNELS; j++) {
+            uchar* mapChannel = maps[j];
             outRgbPixel[j] = mapChannel[inRgbPixel[j]];
         }
     }
     __syncthreads();
 }
 
-__device__ void calculateMap(uchar map[][LEVELS], int target[][LEVELS], int reference[][LEVELS])
-{
-    int tid = threadIdx.x;
+__device__ void calculateMap(uchar map[LEVELS], int target[LEVELS], int reference[LEVELS]) {
     __shared__ int diff_row[LEVELS];
 
-    for (int i = 0; i < CHANNELS; i++) {
-        for(int i_tar = 0; i_tar < LEVELS; i_tar++) {
-            for(int i_ref = tid; i_ref < LEVELS; i_ref += blockDim.x) {
-                diff_row[tid] = abs(reference[i][tid] - target[i][i_tar]);
-            }
-            __syncthreads();
+    int tid = threadIdx.x;
+    int threads = blockDim.x;
 
-            argmin(diff_row, LEVELS, tid, LEVELS/2);
-            __syncthreads();
-
-            if (tid == 0) {
-                map[i][i_tar] = diff_row[1];
-            }
-            __syncthreads();
+    for (int i_tar = 0; i_tar < LEVELS; i_tar++) {
+        for (int i_ref = tid; i_ref < LEVELS; i_ref += threads) {
+            diff_row[tid] = abs(reference[tid] - target[i_tar]);
         }
+        __syncthreads();
+
+        argmin(diff_row, LEVELS, tid, LEVELS / 2);
+        __syncthreads();
+
+        if (tid == 0) {
+            map[i_tar] = diff_row[1];
+        }
+        __syncthreads();
     }
 }
 
-__device__ void process_image(uchar *targets, uchar *refrences, uchar *results)
-{
+__device__ void process_image(uchar* targets, uchar* refrences, uchar* results) {
     assert(blockDim.x % 2 == 0);
 
     __shared__ int histograms_tar[CHANNELS][LEVELS];
@@ -134,15 +131,10 @@ __device__ void process_image(uchar *targets, uchar *refrences, uchar *results)
     __shared__ uchar map[CHANNELS][LEVELS];
 
     int tid = threadIdx.x;
-    int bid = blockIdx.x;
-
-    uchar *img_target = &targets[bid * SIZE * SIZE * CHANNELS];
-    uchar *img_refrence = &refrences[bid * SIZE * SIZE * CHANNELS];
-    uchar *img_out = &results[bid * SIZE * SIZE * CHANNELS];
 
     /*Calculate Histograms*/
-    colorHist((uchar(*)[CHANNELS])img_target, histograms_tar);
-    colorHist((uchar(*)[CHANNELS])img_refrence, histograms_ref);
+    colorHist(reinterpret_cast<uchar(*)[CHANNELS]>(targets), histograms_tar);
+    colorHist(reinterpret_cast<uchar(*)[CHANNELS]>(refrences), histograms_ref);
     __syncthreads();
 
     /*Calculate Reference and target Histogram-Prefix sum*/
@@ -152,49 +144,51 @@ __device__ void process_image(uchar *targets, uchar *refrences, uchar *results)
     }
     __syncthreads();
 
-    calculateMap(map, histograms_tar, histograms_ref);
+    /*Calculate a map 𝑚 from old to new gray levels*/
+    for (int i = 0; i < CHANNELS; i++) {
+        calculateMap(map[i], histograms_tar[i], histograms_ref[i]);
+    }
     __syncthreads();
 
-    performMapping(map, (uchar(*)[CHANNELS])img_target, (uchar(*)[CHANNELS])img_out);
+    performMapping(map, reinterpret_cast<uchar(*)[CHANNELS]>(targets), reinterpret_cast<uchar(*)[CHANNELS]>(results));
+    __syncthreads();
 }
 
 /**********************************************************************************************************************/
 
-/* Job context struct with necessary CPU / GPU pointers to process a single image */
-struct job_context {
-    typedef enum {AVAILABLE = -1} job_status;
+/*Job context struct with necessary CPU / GPU pointers to process a single image*/
+typedef struct {
+    typedef enum {
+        AVAILABLE = -1
+    } job_status;
 
-    uchar *target;
-    uchar *reference;
-    uchar *result;
+    uchar* target;
+    uchar* reference;
+    uchar* result;
     int job_id;
-};
+} job_context;
 
-__global__
-void process_image_kernel(uchar *target, uchar *reference, uchar *result) {
+__global__ void process_image_kernel(uchar* target, uchar* reference, uchar* result) {
     process_image(target, reference, result);
 }
 
-class streams_server : public image_processing_server
-{
+class streams_server : public image_processing_server {
 private:
     cudaStream_t streams[STREAM_COUNT];
-    job_context  jobs[STREAM_COUNT];
+    job_context jobs[STREAM_COUNT];
 
 public:
-    streams_server()
-    {
+    streams_server() {
         for (int i = 0; i < STREAM_COUNT; i++) {
             CUDA_CHECK(cudaStreamCreate(&streams[i]));
-            CUDA_CHECK(cudaMalloc(&(jobs[i].target), IMG_BYTES));
-            CUDA_CHECK(cudaMalloc(&(jobs[i].reference), IMG_BYTES));
-            CUDA_CHECK(cudaMalloc(&(jobs[i].result), IMG_BYTES));
+            CUDA_CHECK(cudaMalloc(&(jobs[i].target), IMG_BYTES * sizeof(uchar)));
+            CUDA_CHECK(cudaMalloc(&(jobs[i].reference), IMG_BYTES * sizeof(uchar)));
+            CUDA_CHECK(cudaMalloc(&(jobs[i].result), IMG_BYTES * sizeof(uchar)));
             jobs[i].job_id = job_context::AVAILABLE;
         }
     }
 
-    ~streams_server() override
-    {
+    ~streams_server() override {
         for (int i = 0; i < STREAM_COUNT; i++) {
             CUDA_CHECK(cudaStreamDestroy(streams[i]));
             CUDA_CHECK(cudaFree(jobs[i].target));
@@ -203,8 +197,7 @@ public:
         }
     }
 
-    bool enqueue(int job_id, uchar *target, uchar *reference, uchar *result) override
-    {
+    bool enqueue(int job_id, uchar* target, uchar* reference, uchar* result) override {
         for (int i = 0; i < STREAM_COUNT; i++) {
             if (jobs[i].job_id == job_context::AVAILABLE) {
                 jobs[i].job_id = job_id;
@@ -218,20 +211,20 @@ public:
         return false;
     }
 
-    bool dequeue(int *job_id) override
-    {
+    bool dequeue(int* job_id) override {
         for (int i = 0; i < STREAM_COUNT; i++) {
-            if (jobs[i].job_id == job_context::AVAILABLE) continue;
+            if (jobs[i].job_id == job_context::AVAILABLE)
+                continue;
 
             cudaError_t status = cudaStreamQuery(streams[i]);
-            
+
             switch (status) {
                 case cudaSuccess:
                     *job_id = jobs[i].job_id;
                     jobs[i].job_id = job_context::AVAILABLE;
                     return true;
                 case cudaErrorNotReady:
-                    break;
+                    continue;
                 default:
                     CUDA_CHECK(status);
                     return false;
@@ -241,179 +234,192 @@ public:
     }
 };
 
-std::unique_ptr<image_processing_server> create_streams_server()
-{
+std::unique_ptr<image_processing_server> create_streams_server() {
     return std::make_unique<streams_server>();
 }
 
-/**********************************************************************************************************************/
+/*********************** Stream server implementation - end ***********************/
 
-// TODO implement a SPSC queue
-// TODO implement the persistent kernel
-// TODO implement a function for calculating the threadblocks count
-
-// Print device properties
-void printDevProp(cudaDeviceProp devProp)
-{
-    printf("Major revision number:         %d\n",  devProp.major);
-    printf("Minor revision number:         %d\n",  devProp.minor);
-    printf("Name:                          %s\n",  devProp.name);
-    printf("Total global memory:           %lu\n",  devProp.totalGlobalMem);
-    printf("Total shared memory per block: %lu\n",  devProp.sharedMemPerBlock);
-    printf("Total registers per block:     %d\n",  devProp.regsPerBlock);
-    printf("Warp size:                     %d\n",  devProp.warpSize);
-    printf("Maximum memory pitch:          %lu\n",  devProp.memPitch);
-    printf("Maximum threads per block:     %d\n",  devProp.maxThreadsPerBlock);
-    for (int i = 0; i < 3; ++i)
-        printf("Maximum dimension %d of block:  %d\n", i, devProp.maxThreadsDim[i]);
-    for (int i = 0; i < 3; ++i)
-        printf("Maximum dimension %d of grid:   %d\n", i, devProp.maxGridSize[i]);
-    printf("Clock rate:                    %d\n",  devProp.clockRate);
-    printf("Total constant memory:         %lu\n",  devProp.totalConstMem);
-    printf("Texture alignment:             %lu\n",  devProp.textureAlignment);
-    printf("Concurrent copy and execution: %s\n",  (devProp.deviceOverlap ? "Yes" : "No"));
-    printf("Number of multiprocessors:     %d\n",  devProp.multiProcessorCount);
-    printf("Kernel execution timeout:      %s\n",  (devProp.kernelExecTimeoutEnabled ?"Yes" : "No"));
-    return;
-}
+/**********************************************************************************/
+/*************************** SPSC Queue implementation ****************************/
+/**********************************************************************************/
 
 int calc_threadBlock_cnt(int threads) {
-    // TODO: BATEL
     cudaDeviceProp devProp;
     CUDA_CHECK(cudaGetDeviceProperties(&devProp, 0));
-    printDevProp(devProp);
+    int registers = threads * 32;
+    int shmem_size = ((LEVELS * sizeof(int)) +
+        2 * (LEVELS * CHANNELS * sizeof(int)) +
+        (LEVELS * CHANNELS * sizeof(uchar)) +
+        sizeof(job_context));
 
-    return min(N_IMAGES/QUEUE_SIZE, 10);
+    int max_shmem = devProp.sharedMemPerMultiprocessor / shmem_size;
+    int max_threads = devProp.maxThreadsPerMultiProcessor / threads;
+    int max_registers = devProp.regsPerMultiprocessor / registers;
+
+    int min_threads_shmem = min(max_shmem, max_threads);
+
+    int res = min(max_registers, min_threads_shmem) * devProp.multiProcessorCount;
+    return res;
 }
 
-struct queue {
-    struct request {
-        uchar *target;
-        uchar *reference;
 
-        __device__ __host__ request(): target(new uchar), reference(new uchar) {}
-        __device__ __host__ request(uchar *target, uchar *reference): target(target), reference(reference) {}
-        __device__ __host__ ~request() { delete target; delete reference; }
-    };
-
-    struct response {
-        uchar *result;
-
-        __device__ __host__ response(): result(new uchar) {}
-        __device__ __host__ response(uchar *result): result(result) {}
-        __device__ __host__ ~response() { delete result; }
-    };
-
-    job_context jobs[QUEUE_SIZE];
-    int index;
-
-    queue(): index(0) {}
-
-    __device__ __host__ bool enqueue_response(response resp) { 
-        assert(full() == false);
-        jobs[index+1].result = resp.result;
-        jobs[index].job_id = 1; // TODO: BATEL
-        ++index;
-        return true;
-    }
-
-    __device__ __host__ request dequeue_request() {
-        assert(empty() == false);
-        request req(jobs[index].target, jobs[index].reference);
-        jobs[index].job_id = job_context::AVAILABLE;
-        --index;
-        return req;
-    }
-
-    bool enqueue_request(request req) {
-        assert(full() == false);
-        jobs[index+1].target = req.target;
-        jobs[index+1].reference = req.reference;
-        jobs[index].job_id = 1; // TODO: BATEL
-        ++index;
-        return true;
-    }
-
-    response dequeue_response() {
-        assert(empty() == false);
-        response resp(jobs[index].result);
-        jobs[index].job_id = job_context::AVAILABLE;
-        --index;
-        return resp;
-    }
-
-    __device__ __host__ bool empty() { return index == 0; }
-
-    __device__ __host__ bool full() { return index == QUEUE_SIZE-1; }
-};
-
-__device__ void persistent_kernel(queue* cpu_to_gpu_queue, queue* gpu_to_cpu_queue) {
-    // TODO: BATEL
-    while (1/*running*/) {
-        queue::request request;
-        queue::response response;
-
-        request = cpu_to_gpu_queue->dequeue_request();
-        process_image(request.target, request.reference, response.result);
-        gpu_to_cpu_queue->enqueue_response(response);
-    }
-}
-
-__global__
-void process_persistent_kernel(queue* cpu_to_gpu_queues, queue* gpu_to_cpu_queues) {
-    persistent_kernel(&cpu_to_gpu_queues[blockIdx.x], &gpu_to_cpu_queues[blockIdx.x]);
-}
-
-class queue_server : public image_processing_server
-{
+template <typename T, uint8_t size> class ring_buffer {
 private:
-    // TODO define queue server context (memory buffers, etc...)
-    queue* cpu_to_gpu_queues;
-    queue* gpu_to_cpu_queues;
-    int queue_cnt;
+    static const size_t N = 1 << size;
+    T _jobs[N];
+    cuda::atomic<size_t> _head = 0, _tail = 0;
 
 public:
-    queue_server(int threads)
-    {
-        // TODO initialize host state
-        // TODO launch GPU persistent kernel with given number of threads, and calculated number of threadblocks
-        int queue_cnt = calc_threadBlock_cnt(threads);
-
-        CUDA_CHECK(cudaMallocHost(&cpu_to_gpu_queues, queue_cnt * sizeof(queue)));
-        CUDA_CHECK(cudaMallocHost(&gpu_to_cpu_queues, queue_cnt * sizeof(queue)));
-        process_persistent_kernel<<<queue_cnt, threads>>>(cpu_to_gpu_queues, gpu_to_cpu_queues);
+    void push(const T& job) {
+        int tail = _tail.load(cuda::memory_order_relaxed);
+        while (tail - _head.load(cuda::memory_order_acquire) == N);
+        _jobs[_tail % N] = job;
+        _tail.store(tail + 1, cuda::memory_order_release);
     }
 
-    ~queue_server() override
-    {
-        // TODO free resources allocated in constructor
-        CUDA_CHECK(cudaFreeHost(cpu_to_gpu_queues));
-        CUDA_CHECK(cudaFreeHost(gpu_to_cpu_queues));
+    T pop() {
+        int head = _head.load(cuda::memory_order_relaxed);
+        while (_tail.load(cuda::memory_order_acquire) == _head);
+        T item = _jobs[_head % N];
+        _head.store(head + 1, cuda::memory_order_release);
+        return item;
+    }
+};
+
+class queue {
+private:
+    size_t N;
+    job_context* jobs;
+    cuda::atomic<size_t> queue_head, queue_tail;
+
+public:
+    __host__ queue() : queue_head(0), queue_tail(0), N(QUEUE_SLOTS) {
+        CUDA_CHECK(cudaMallocHost(&jobs, N * sizeof(job_context)));
     }
 
-    bool enqueue(int job_id, uchar *target, uchar *reference, uchar *result) override
-    {
-        // TODO push new task into queue if possible
-        for (int i = 0; i < queue_cnt; i++) {
-            if (cpu_to_gpu_queues[i].full()) continue;
-            if (cpu_to_gpu_queues[i].enqueue_request(queue::request(target, reference))) return true;
+    __host__ ~queue() {
+        CUDA_CHECK(cudaFreeHost(jobs));
+    }
+
+    __device__ __host__ job_context dequeue_request() {
+        job_context item;
+        item.job_id = -1;
+        int head = queue_head.load(cuda::memory_order_relaxed);
+        if (queue_tail.load(cuda::memory_order_acquire) != queue_head) {
+            item = jobs[queue_head % N];
+            jobs[queue_head % N].job_id = -1;
+            queue_head.store(head + 1, cuda::memory_order_release);
         }
-
-        return false;
+        return item;
     }
 
-    bool dequeue(int *job_id) override
-    {
-        // TODO query (don't block) the producer-consumer queue for any responses.
-        return false;
-
-        // TODO return the job_id of the request that was completed.
-        //*job_id = ... 
+    __device__ __host__ bool enqueue_response(const job_context& new_job) {
+        int tail = queue_tail.load(cuda::memory_order_relaxed);
+        if (N == (tail - queue_head.load(cuda::memory_order_acquire))) {
+            return false;
+        }
+        jobs[queue_tail % N] = new_job;
+        queue_tail.store(tail + 1, cuda::memory_order_release);
         return true;
     }
 };
 
-std::unique_ptr<image_processing_server> create_queues_server(int threads)
-{
+__global__ void process_persistent_kernel(queue* cpu_to_gpu_queues, queue* gpu_to_cpu_queues) {
+    __shared__ job_context request;
+
+    request.job_id = -1;
+    int thread = threadIdx.x;
+
+    while (true) {
+        if (thread == 0)
+            request = cpu_to_gpu_queues[blockIdx.x].dequeue_request();
+        __syncthreads();
+
+        if (request.job_id == KILL_JOB_ID)
+            break;
+
+        if (request.job_id != -1) {
+            process_image(request.target, request.reference, request.result);
+            __syncthreads();
+
+            if (thread == 0)
+                while (!gpu_to_cpu_queues[blockIdx.x].enqueue_response(request))
+                    ;
+            __syncthreads();
+        }
+    }
+}
+
+class queue_server : public image_processing_server {
+private:
+    int queue_count;
+    int curr_block;
+
+    queue* cpu_to_gpu_queues;
+    char* buffer_CPU_GPU;
+
+    queue* gpu_to_cpu_queues;
+    char* buffer_GPU_CPU;
+
+public:
+    queue_server(int threads) {
+        queue_count = calc_threadBlock_cnt(threads);
+        curr_block = 0;
+
+        CUDA_CHECK(cudaMallocHost(&buffer_GPU_CPU, queue_count * sizeof(queue)));
+        gpu_to_cpu_queues = reinterpret_cast<queue*>(buffer_GPU_CPU);
+
+        CUDA_CHECK(cudaMallocHost(&buffer_CPU_GPU, queue_count * sizeof(queue)));
+        cpu_to_gpu_queues = reinterpret_cast<queue*>(buffer_CPU_GPU);
+
+        RUN_IN_QUEUE(new (&gpu_to_cpu_queues[i]) queue();
+        new (&cpu_to_gpu_queues[i]) queue(););
+
+        process_persistent_kernel<<<queue_count, threads>>>(cpu_to_gpu_queues, gpu_to_cpu_queues);
+    }
+
+    ~queue_server() override {
+        // Sends kill signal to the threads
+        RUN_IN_QUEUE(this->enqueue(KILL_JOB_ID, nullptr, nullptr, nullptr););
+
+        // Free resources allocated in constructor
+        RUN_IN_QUEUE(gpu_to_cpu_queues[i].~queue();
+        cpu_to_gpu_queues[i].~queue(););
+        CUDA_CHECK(cudaFreeHost(buffer_GPU_CPU));
+        CUDA_CHECK(cudaFreeHost(buffer_CPU_GPU));
+    }
+
+    bool dequeue(int* job_id) override {
+        job_context request;
+        request.job_id = -1;
+
+        RUN_IN_QUEUE(request = gpu_to_cpu_queues[i].dequeue_request();
+        if (request.job_id != -1) {
+            *job_id = request.job_id;
+            return true;
+        });
+
+        return false;
+    }
+
+    bool enqueue(int job_id, uchar* target, uchar* reference, uchar* result) override {
+        job_context new_job;
+        new_job.reference = reference;
+        new_job.target = target;
+        new_job.job_id = job_id;
+        new_job.result = result;
+
+        bool res = cpu_to_gpu_queues[curr_block].enqueue_response(new_job);
+
+        if (res) {
+            curr_block = (curr_block + 1);
+            curr_block = curr_block % queue_count;
+        }
+        return res;
+    }
+};
+
+std::unique_ptr<image_processing_server> create_queues_server(int threads) {
     return std::make_unique<queue_server>(threads);
 }
