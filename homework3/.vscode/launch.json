@@ -1,0 +1,44 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "debug server rpc",
+            "type": "cuda-gdb",
+            "request": "launch",
+            "program": "${workspaceFolder}/server",
+            "args": "rpc 12345",
+            "initCommands": ["set cuda api_failures stop"]
+
+        },        
+        {
+            "name": "debug client rpc",
+            "type": "cuda-gdb",
+            "request": "launch",
+            "program": "${workspaceFolder}/client",
+            "args": "rpc 12345",
+            "initCommands": ["set cuda api_failures stop"]
+
+        },    
+        {
+            "name": "debug server queue",
+            "type": "cuda-gdb",
+            "request": "launch",
+            "program": "${workspaceFolder}/server",
+            "args": "queue 12345",
+            "initCommands": ["set cuda api_failures stop"]
+
+        },        
+        {
+            "name": "debug client queue",
+            "type": "cuda-gdb",
+            "request": "launch",
+            "program": "${workspaceFolder}/client",
+            "args": "queue 12345",
+            "initCommands": ["set cuda api_failures stop"]
+
+        }, 
+    ]
+}
